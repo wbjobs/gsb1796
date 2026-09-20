@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多租户配置中心（纯前端）</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <h1>多租户配置中心</h1>
+    <p class="hint">IndexedDB 持久化 · Web Worker 写入 · BroadcastChannel 热更新 —— 再开一个标签页即可验证跨页热更新</p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>租户与继承链</h2>
+      <div id="tenant-list"></div>
+      <div id="chain-view" class="chain"></div>
+    </section>
+
+    <section class="panel">
+      <h2>生效配置 <span id="effective-version" class="badge"></span></h2>
+      <p class="hint">键旁标注来源租户，体现覆盖优先级（叶子 &gt; 父级 &gt; 全局）</p>
+      <div id="effective-config"></div>
+    </section>
+
+    <section class="panel">
+      <h2>当前租户 Overrides <span id="override-version" class="badge"></span></h2>
+      <pre id="override-view"></pre>
+      <h3>写入补丁（JSON，null 表示删除键）</h3>
+      <textarea id="patch-editor" rows="6" spellcheck="false">{
+  "features": { "aiAssistant": false }
+}</textarea>
+      <div class="btn-row">
+        <button id="apply-btn">应用补丁</button>
+        <button id="force-btn" class="secondary" disabled>强制覆盖写入</button>
+      </div>
+      <div id="write-result"></div>
+    </section>
+
+    <section class="panel">
+      <h2>历史版本与回滚</h2>
+      <div id="history-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>热更新事件日志</h2>
+      <div id="event-log" class="log"></div>
+    </section>
+  </main>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
