@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多租户配置中心 Demo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 0; background: #0f1420; color: #d6deeb; }
+  header { padding: 14px 20px; background: #171e31; border-bottom: 1px solid #2a3550; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; color: #82aaff; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 20px; }
+  section { background: #171e31; border: 1px solid #2a3550; border-radius: 8px; padding: 14px; }
+  h2 { font-size: 13px; margin: 0 0 10px; color: #7fdbca; text-transform: uppercase; letter-spacing: 1px; }
+  select, input, button { background: #0f1420; color: #d6deeb; border: 1px solid #2a3550; border-radius: 5px; padding: 6px 9px; font: inherit; font-size: 13px; }
+  button { cursor: pointer; background: #223156; }
+  button:hover { background: #2c4172; }
+  button.danger { background: #5a2732; }
+  pre { background: #0b0f1a; border-radius: 6px; padding: 10px; overflow: auto; max-height: 300px; font-size: 12px; margin: 8px 0 0; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+  .chain span { background: #223156; padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+  .chain em { color: #5c6d9c; font-style: normal; margin: 0 4px; }
+  #log { max-height: 220px; overflow: auto; font-size: 12px; }
+  #log div { padding: 3px 6px; border-bottom: 1px solid #1c2440; }
+  .tag { color: #ffcb6b; }
+  .conflict { color: #ff6b7a; }
+  .ok { color: #7fdbca; }
+  .hist-item { display: flex; justify-content: space-between; padding: 4px 6px; border-bottom: 1px solid #1c2440; font-size: 12px; align-items: center; }
+  label { font-size: 12px; color: #8ea0c5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>多租户配置中心（IndexedDB + BroadcastChannel + Web Worker）</h1>
+  <label>租户 <select id="tenantSel"></select></label>
+  <span id="clientId" class="tag"></span>
+  <span style="font-size:12px;color:#8ea0c5">💡 多开几个标签页可验证热更新与冲突</span>
+</header>
+<main>
+  <section>
+    <h2>继承链</h2>
+    <div class="chain" id="chain"></div>
+    <h2 style="margin-top:14px">生效配置（实时）</h2>
+    <pre id="resolved">…</pre>
+  </section>
+  <section>
+    <h2>提交覆盖</h2>
+    <div class="row">
+      <input id="path" placeholder="路径，如 theme.color" style="flex:1">
+      <input id="value" placeholder='JSON 值，如 "red" / 42 / true' style="flex:1">
+    </div>
+    <div class="row">
+      <label>优先级 <input id="priority" type="number" value="0" style="width:70px"></label>
+      <label>baseVersion <input id="baseVersion" type="number" placeholder="留空=不校验" style="width:90px"></label>
+      <label>冲突策略
+        <select id="strategy">
+          <option value="manual">manual（报错）</option>
+          <option value="theirs">theirs（跳过冲突）</option>
+          <option value="mine">mine（强制覆盖）</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <button id="setBtn">提交覆盖</button>
+      <button id="delBtn" class="danger">删除该键（墓碑）</button>
+      <button id="conflictBtn">模拟冲突提交</button>
+    </div>
+    <pre id="opResult"></pre>
+  </section>
+  <section>
+    <h2>历史版本 / 回滚</h2>
+    <div id="history"></div>
+  </section>
+  <section>
+    <h2>热更新事件日志</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script type="module">
+import { createConfigClient } from './src/tenant-config.js';
+
+const SEED = {
+  __root__:  { parent: null,      overrides: {
+    'theme.color':   { value: 'blue' },
+    'theme.fontSize':{ value: 14 },
+    'feature.chat':  { value: false },
+    'limits.api':    { value: 100 },
+  }},
+  groupA:    { parent: '__root__', overrides: {
+    'theme.color':  { value: 'green' },
+    'feature.chat': { value: true },
+  }},
+  tenant1:   { parent: 'groupA', overrides: { 'theme.color': { value: 'red' } } },
+  tenant2:   { parent: 'groupA', overrides: {} },
+};
+
+const client = createConfigClient();
+await client.init(SEED);
+document.getElementById('clientId').textContent = `client: ${client.clientId}`;
+
+const $ = id => document.getElementById(id);
+const tenantSel = $('tenantSel');
+let currentTenant = null;
+let currentVersion = 0;
+
+function log(msg, cls = '') {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  $('log').prepend(div);
+}
+
+async function refreshTenants() {
+  const tenants = await client.listTenants();
+  tenantSel.innerHTML = tenants
+    .filter(t => t.tenantId !== '__root__')
+    .map(t => `<option value="${t.tenantId}">${t.tenantId} (v${t.version})</option>`).join('');
+  if (!currentTenant) currentTenant = tenantSel.value;
+  tenantSel.value = currentTenant;
+}
+
+async function refreshHistory() {
+  const hist = await client.history(currentTenant);
+  $('history').innerHTML = hist.map(h => `
+    <div class="hist-item">
+      <span>v${h.version} · ${h.label} · ${h.source} · ${new Date(h.ts).toLocaleTimeString()}</span>
+      ${h.version < currentVersion ? `<button data-v="${h.version}" class="rb">回滚到此</button>` : '<span class="ok">当前</span>'}
+    </div>`).join('') || '<div style="color:#8ea0c5">暂无历史</div>';
+  document.querySelectorAll('.rb').forEach(btn => btn.onclick = async () => {
+    const r = await client.rollback(currentTenant, Number(btn.dataset.v));
+    log(`回滚 ${currentTenant} -> v${r.restoredFrom}（新版本 v${r.version}）`, 'ok');
+  });
+}
+
+async function subscribe() {
+  const r = await client.resolve(currentTenant);
+  currentVersion = r.version;
+  $('chain').innerHTML = r.chain.map(t => `<span>${t}</span>`).join('<em>→</em>');
+  $('resolved').textContent = JSON.stringify(r.config, null, 2);
+  $('baseVersion').placeholder = `当前 v${r.version}`;
+  await refreshHistory();
+}
+
+await client.watch('__root__', () => {}); // 保持 root 缓存
+await refreshTenants();
+await subscribe();
+
+// 热更新：任何标签页的提交/回滚都会触发
+for (const t of ['groupA', 'tenant1', 'tenant2']) {
+  client.watch(t, (next, diff, msg) => {
+    if (msg.type === 'init') return;
+    if (next.tenantId === currentTenant) {
+      currentVersion = next.version;
+      $('resolved').textContent = JSON.stringify(next.config, null, 2);
+      $('baseVersion').placeholder = `当前 v${next.version}`;
+      refreshHistory();
+    }
+    log(`热更新 [${next.tenantId}] v${next.version} 来源=${msg.source}${msg.rollback ? '（回滚）' : ''} 变更=${diff.map(d => d.path).join(', ') || '-'}`, 'tag');
+  });
+}
+
+tenantSel.onchange = () => { currentTenant = tenantSel.value; subscribe(); };
+
+function parseValue(raw) {
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+$('setBtn').onclick = async () => {
+  const path = $('path').value.trim();
+  if (!path) return;
+  try {
+    const r = await client.set(currentTenant, { [path]: parseValue($('value').value) }, {
+      priority: Number($('priority').value) || 0,
+      baseVersion: $('baseVersion').value === '' ? undefined : Number($('baseVersion').value),
+      strategy: $('strategy').value,
+    });
+    $('opResult').textContent = `✔ 已提交，新版本 v${r.version}`;
+    log(`提交 ${currentTenant} ${path} -> v${r.version}`, 'ok');
+  } catch (err) {
+    if (err.code === 'CONFLICT') {
+      $('opResult').textContent = `✖ 冲突（当前 v${err.currentVersion}）：\n` +
+        err.conflicts.map(c => `  ${c.path}: 线上=${JSON.stringify(c.currentValue)} 我方=${JSON.stringify(c.incomingValue)} 基线=${JSON.stringify(c.baseValue)}`).join('\n');
+      log(`冲突检测：${err.conflicts.map(c => c.path).join(', ')}`, 'conflict');
+    } else {
+      $('opResult').textContent = `✖ ${err.message}`;
+    }
+  }
+};
+
+$('delBtn').onclick = async () => {
+  const path = $('path').value.trim();
+  if (!path) return;
+  const r = await client.set(currentTenant, { [path]: null });
+  $('opResult').textContent = `✔ 已删除（墓碑），新版本 v${r.version}`;
+};
+
+// 模拟冲突：先记下旧版本号，再在“别处”推进版本，最后用旧 baseVersion 提交
+$('conflictBtn').onclick = async () => {
+  const staleVersion = currentVersion;
+  await client.set(currentTenant, { 'conflict.key': `other-${Date.now() % 1000}` });
+  try {
+    await client.set(currentTenant, { 'conflict.key': 'mine' }, { baseVersion: staleVersion, strategy: 'manual' });
+    $('opResult').textContent = '未冲突（键不同则属正常）';
+  } catch (err) {
+    if (err.code === 'CONFLICT') {
+      $('opResult').textContent = `✖ 检测到冲突（stale baseVersion=v${staleVersion}，当前 v${err.currentVersion}）：\n` +
+        err.conflicts.map(c => `  ${c.path}: 线上=${JSON.stringify(c.currentValue)} 我方=${JSON.stringify(c.incomingValue)}`).join('\n');
+      log('冲突模拟成功：已检测并拒绝过期提交', 'conflict');
+    }
+  }
+};
+</script>
+</body>
+</html>
